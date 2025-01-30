@@ -8,10 +8,6 @@ import numpy as np
 import scipy.spatial as sp
 import matplotlib.pyplot as plt
 
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-import torch.optim as optim
 
 def progressbar(it, prefix="", size=30, out=sys.stdout):
 
@@ -53,16 +49,38 @@ def sym_dataset( data, transformations ):
     return( new_points, new_Y )
 
 
-def symmetrisation( data_train, data_test, transformations, orbit_dim, model, func_name,  sym_group = "I", bandwidth = 0):
-    # param transformation: list of n numpy arrays of shape (d, d)
+def find_small_R_inds( data, sym_group, bandwidth, axis, sample_size ):
+
+    if sym_group == "SO3":
+        R_x = np.sqrt( 2 * np.sum( data**2, axis = 1 ) )
+        limit = 2 * bandwidth * ( - 2 * np.log( sample_size**( - 2 / (2 + 1) ) ) )**(1/2)
+        return( R_x < limit )
+
+    if sym_group == "S1":
+        X_proj = data - np.outer( data @ axis, axis )
+        R_x = np.sqrt( np.sum( X_proj**2, axis = 1 ) )
+        limit = 2 * bandwidth * ( - 2 * np.log( sample_size**( - 2 / (2 + 2) ) ) )
+        print( limit )
+        return( R_x < limit )
+
+    return( np.array([]) )
+
+
+def symmetrisation( data_train, data_test, transformations, orbit_dim, model, func_name,  
+                    sym_group = "I", bandwidth = 0, base_bandwidth = 0, axis = 0):
+    # param transformations: list of n numpy arrays of shape (d, d)
     # param model: a function with inputs (data_train,  data_test, *args)
 
     n = data_train[0].shape[0]
 
-    new_data_test = sym_dataset( data_test, transformations )
+    new_data_test = sym_dataset( (data_test[0], data_test[1]), transformations )
+
     MSPE, risk, y_pred = model( data_train, new_data_test, func_name, orbit_dim, sym_group, 5, bandwidth = bandwidth )
 
-    sym_y_pred = np.mean( y_pred.reshape( (len(transformations) + 1, data_test[0].shape[0]) ), axis = 0 )
+    non_zero_inds = np.nonzero(y_pred)
+    pre_syms_preds = y_pred.reshape( (len(transformations) + 1, data_test[0].shape[0]) )
+
+    sym_y_pred = np.mean( pre_syms_preds, axis = 0, where = (pre_syms_preds**2 > 0) )
     sym_MSPE = np.mean( (sym_y_pred - data_test[1] )**2 )
     sym_risk = np.mean( (sym_y_pred - reg_function( data_test[0], func_name ) )**2 ) 
 
@@ -148,8 +166,6 @@ def angle_dists( arr_1, arr_2 ):
 
 def generate_data( sample_size, dimension, sigma_eps, func_name ):
 
-    # pdb.set_trace()
-    # X = rng.random( ( sample_size, dimension ) )
     X = rng.normal( 0, 2, ( sample_size, dimension ) )
     X_dirs = ( X.T / np.sqrt( np.sum( X**2, axis = 1 ) ) )
     X = np.transpose( X_dirs * ( rng.random( sample_size ) ** (1/3) ) ) ## Generates points uniforms on B_{R^3}(0,1)
@@ -186,17 +202,10 @@ def fit_LCE(data_train, data_test, bandwidth, func_name, sym_group = "I", kernel
     X_test = data_test[0]
     Y_test = data_test[1]
 
-    # if sym_group == "SO3":
-        # transformations = sample_SO3( X_test.shape[0] )
-        # X_test, Y_test = sym_dataset( data_test, transformations )
-
     dists = sp.distance_matrix( X_train, X_test )
     if kernel == "rect":
         flags = np.array( (dists < bandwidth) * 1 )
         vals = (flags.T * Y_train).T
-        # counts = np.sum( flags, axis = 0 )
-        # print( f"There are { flags.shape[1] } test points and { np.nonzero( counts )[0].shape[0] } actual estimates.\n" )
-        # pdb.set_trace()
     if kernel == "triangle":
         flags = np.array( (dists < bandwidth) * 1 ) * dists
         vals = (flags.T * Y_train).T
@@ -218,7 +227,7 @@ def fit_LCE(data_train, data_test, bandwidth, func_name, sym_group = "I", kernel
 
 def fit_bandwidth_CV(data, folds, func_name, sym_group = "I", bandwidth_numbers = 600 ):
 
-    bandwidth_grid = np.linspace(0.03, 0.3, bandwidth_numbers)
+    bandwidth_grid = np.exp( np.linspace(-3.0, 0.5, bandwidth_numbers) )
     errors = np.zeros( bandwidth_grid.shape )
 
     n = data[0].shape[0]
@@ -235,7 +244,20 @@ def fit_bandwidth_CV(data, folds, func_name, sym_group = "I", bandwidth_numbers 
             for elem in test_inds: train_inds.remove(elem) 
             data_test = ( data[0][test_inds, ], data[1][test_inds, ] )
             data_train = ( data[0][train_inds, ], data[1][train_inds, ] )
-            this_error[i] = fit_LCE( data_train, data_test, func_name, h, sym_group )[0]
+
+            if sym_group == "I":
+                this_error[i] = fit_LCE( data_train, data_test, h, func_name , sym_group )[0]
+            if sym_group == "SO3":
+                this_error[i] = symmetrisation( data_train, 
+                                                data_test, 
+                                                sample_SO3( int(n) ), 
+                                                orbit_dim = 2, 
+                                                model = fit_LCE_CV, 
+                                                func_name = func_name, 
+                                                sym_group = "SO3", 
+                                                bandwidth = h,
+                                                base_bandwidth = h )[0]
+
 
         errors[j] = this_error.mean()
 
@@ -253,8 +275,6 @@ def fit_LCE_CV(data_train, data_test, func_name, orbit_dim = 0, sym_group = "I",
 
     n = data_test[0].shape[0]
     d = data_test[0].shape[1]
-
-    # print("fit_LCE_CV", bandwidth)
 
     if bandwidth == 0:
         bandwidth = fit_bandwidth_CV( data_train, folds, func_name, sym_group )
@@ -295,7 +315,9 @@ def fit_S_G_f_n( data_train, data_test, data_validation, delta, beta, func_name,
                                        model = fit_LCE_CV, 
                                        func_name = func_name, 
                                        sym_group = "S1", 
-                                       bandwidth = bandwidth_S1 ) )
+                                       bandwidth = bandwidth_S1,
+                                       base_bandwidth = bandwidth_I, 
+                                       axis = axis ) )
 
 
     ## K_2
@@ -307,7 +329,8 @@ def fit_S_G_f_n( data_train, data_test, data_validation, delta, beta, func_name,
                                    model = fit_LCE_CV, 
                                    func_name = func_name, 
                                    sym_group = "SO3", 
-                                   bandwidth = bandwidth_SO_3 ) )
+                                   bandwidth = bandwidth_SO_3,
+                                   base_bandwidth = bandwidth_I ) )
 
     #### Model Selection
     best_index = 0
@@ -317,29 +340,37 @@ def fit_S_G_f_n( data_train, data_test, data_validation, delta, beta, func_name,
 
     if best_index == 0:
         if verbose: print( f"Best Symmetric Group: I\n")
-        output = list( fit_LCE_CV( data_train, data_validation, func_name, bandwidth = bandwidth_I ) ) + ["I"]
+        output = list( fit_LCE_CV( data_train, 
+                                   data_validation, 
+                                   func_name, 
+                                   bandwidth = bandwidth_I) ) + ["I"]
     elif best_index == len( models ) - 1:
         if verbose: print( f"Best Symmetric Group: SO(3)\n")
         output = list( symmetrisation( data_train, 
-                                 data_validation, 
-                                 sample_SO3( int(n * sym_scale_cst) ), 
-                                 orbit_dim = 2, 
-                                 model = fit_LCE_CV, 
-                                 func_name = func_name, 
-                                 sym_group = "SO3", 
-                                 bandwidth = bandwidth_SO_3 ) ) + ["SO3"]
+                                       data_validation, 
+                                       sample_SO3( int(n * sym_scale_cst) ), 
+                                       orbit_dim = 2, 
+                                       model = fit_LCE_CV, 
+                                       func_name = func_name, 
+                                       sym_group = "SO3", 
+                                       bandwidth = bandwidth_SO_3,
+                                       base_bandwidth = bandwidth_I ) ) + ["SO3"]
     else: 
         axis = axial_grid[best_index - 1]
-        if verbose: print( f"Best Symmetric Group: S^1_({axis[0]:.2f},{axis[1]:.2f},{axis[2]:.2f})\n")
+        if verbose: 
+            print( f"Best Symmetric Group: S^1_({axis[0]:.2f},{axis[1]:.2f},{axis[2]:.2f})")
+            print( f"SO3 MSPE {models[-1][0]:.2f} vs S1 MSPE {models[best_index][0]:.2f}\n"  )
         output = list( symmetrisation( data_train, 
-                                 data_validation, 
-                                 sample_S1( axis, int(n * sym_scale_cst) ), 
-                                 orbit_dim = 1, 
-                                 model = fit_LCE_CV, 
-                                 func_name = func_name, 
-                                 sym_group = "S1", 
-                                 bandwidth = bandwidth_S1 ) ) + [f"S^1_({axis[0]:.2f},{axis[1]:.2f},{axis[2]:.2f})"]
+                                       data_validation, 
+                                       sample_S1( axis, int(n * sym_scale_cst) ), 
+                                       orbit_dim = 1, 
+                                       model = fit_LCE_CV, 
+                                       func_name = func_name, 
+                                       sym_group = "S1", 
+                                       bandwidth = bandwidth_S1,
+                                       base_bandwidth = bandwidth_I ) ) + [f"S^1_({axis[0]:.2f},{axis[1]:.2f},{axis[2]:.2f})"]
 
+    if verbose: print(f"Number of fitted models:\t{len(models)}")
 
     return( tuple( output ) )
 
@@ -347,7 +378,7 @@ def fit_S_G_f_n( data_train, data_test, data_validation, delta, beta, func_name,
 
 ## Main Code
 
-def run_sims(num_sims, sample_sizes, func_name):
+def run_sims(num_sims, sample_sizes, func_name, verbose = False):
 
     print( f"Numder of Simulations: {num_sims}" )
     print( f"Sample Sizes: {sample_sizes}" )
@@ -358,7 +389,7 @@ def run_sims(num_sims, sample_sizes, func_name):
     max_orbit_dim = 2
     sigma_eps = 0.1
     beta = 1
-    sym_scale_cst = 0.2
+    sym_scale_cst = 1
 
     test_errors_LCE = np.zeros( (num_sims, len(sample_sizes)) )
     test_errors_S_G_HAT_LCE = np.zeros( (num_sims, len(sample_sizes)) )
@@ -372,15 +403,19 @@ def run_sims(num_sims, sample_sizes, func_name):
         print( f"\nSample Size:     {sample_size}" )
 
         base_bandwidths[j] = fit_bandwidth_holder( sample_size, beta, 3, scale = 1 )
-        this_best_groups =[]
+        this_best_groups = []
 
         for i in progressbar( range(num_sims) ):
+
             data_train = generate_data( sample_size, dimension, sigma_eps, func_name )
             data_test = generate_data( sample_size, dimension, sigma_eps, func_name )
             data_validation = generate_data( val_sample_size, dimension, sigma_eps, func_name )
             
             data_train_full = ( np.concatenate( (data_train[0], data_test[0]), axis = 0),
                                 np.concatenate( (data_train[1], data_test[1]), axis = 0) )
+
+
+            base_start = time.time() 
 
             lce_error = fit_LCE_CV( data_train_full, 
                                     data_validation, 
@@ -389,22 +424,29 @@ def run_sims(num_sims, sample_sizes, func_name):
                                     bandwidth = fit_bandwidth_holder( 2 * sample_size, beta, 3, scale = 1 ) ) 
             test_errors_LCE[i,j] = lce_error[1]
 
+            base_end = time.time()
+
             s_g_hat_lce_error = fit_S_G_f_n( data_train, 
                                              data_test, 
                                              data_validation,
-                                             delta = find_delta( sample_size, beta, dimension, max_orbit_dim, np.pi ), 
+                                             delta = find_delta( sample_size, beta, dimension, max_orbit_dim, 2*np.pi ), 
                                              beta = beta, 
                                              func_name = func_name,
                                              sym_scale_cst = sym_scale_cst,
-                                             verbose = False )
+                                             verbose = verbose )
             test_errors_S_G_HAT_LCE[i,j] = s_g_hat_lce_error[1]
+
+            sym_end = time.time()
+
+            if verbose: 
+                print( f"Base time:\t{base_end - base_start:.5f}s")
+                print( f"Sym time:\t{sym_end - base_end:.5f}s" )
 
             this_best_groups.append( s_g_hat_lce_error[3] )
 
 
+
         print( f"LCE Risk: \t {np.mean( test_errors_LCE[:,j] ):e} +/- {np.std( test_errors_LCE[:,j] ):e}" )
-        ratio = np.mean( test_errors_NN[:,j] ) / np.mean( test_errors_LCE[:,j] )      
-        print( f"NN Risk: \t {np.mean( test_errors_NN[:,j] ):e} +/- {np.std( test_errors_NN[:,j] ):e}, \t {ratio:%}" )
         ratio = np.mean( test_errors_S_G_HAT_LCE[:,j] ) / np.mean( test_errors_LCE[:,j] )
         print( f"Sym_LCE Risk: \t {np.mean( test_errors_S_G_HAT_LCE[:,j] ):e} +/- {np.std( test_errors_S_G_HAT_LCE[:,j] ):e}, \t {ratio:%}" )
         print( "Estimated groups: ")
@@ -414,15 +456,11 @@ def run_sims(num_sims, sample_sizes, func_name):
 
     X = np.vstack([ np.log( sample_sizes ), np.ones(len(sample_sizes)) ]).T
     base_rate, base_int = np.linalg.lstsq( X, np.log( test_errors_LCE.mean(axis = 0) ), rcond = None )[0]
-    nn_rate, nn_int = np.linalg.lstsq( X, np.log( test_errors_NN.mean(axis = 0) ), rcond = None )[0]
     sym_rate, sym_int = np.linalg.lstsq( X, np.log( test_errors_S_G_HAT_LCE.mean(axis = 0) ), rcond = None )[0]
 
     print(f"Base log/log slope:  {base_rate}, expected {- 2*beta / (2*beta + 3)}")
-    print(f"Base log/log slope:  {nn_rate}, expected {- 2*beta / (2*beta + 3)}")
-    print(f"Base log/log slope:  {sym_rate}, expected {- 2*beta / (2*beta + 2)}")
+    print(f"Sym log/log slope:  {sym_rate}, expected {- 2*beta / (2*beta + 2)}")
 
-    with open(func_name + "_nn_results.pkl", "wb") as f:
-        pickle.dump(test_errors_NN, f)
     with open(func_name + "_lce_results.pkl", "wb") as f:
         pickle.dump(test_errors_LCE, f)
     with open(func_name + "_sym_lce_results.pkl", "wb") as f:
@@ -435,8 +473,6 @@ def run_sims(num_sims, sample_sizes, func_name):
 
 def plot_results( num_sims, sample_sizes, func_name ):
 
-    with open(func_name + "_nn_results.pkl", "rb") as f:
-        test_errors_NN = pickle.load(f)
     with open(func_name + "_lce_results.pkl", "rb") as f:
         test_errors_LCE = pickle.load(f)
     with open(func_name + "_sym_lce_results.pkl", "rb") as f:
@@ -473,10 +509,10 @@ def plot_results( num_sims, sample_sizes, func_name ):
 def main():
 
     num_sims = 30
-    sample_sizes = [30, 50, 75, 100, 150, 200, 300]
+    sample_sizes = [30, 50, 75, 100, 150, 200, 300] 
     func_name = "f3"
 
-    run_sims( num_sims, sample_sizes, func_name )
+    run_sims( num_sims, sample_sizes, func_name, verbose = False )
     plot_results( num_sims, sample_sizes, func_name )
 
     return(0)

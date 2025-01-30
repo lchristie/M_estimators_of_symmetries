@@ -8,10 +8,10 @@ import numpy as np
 import scipy.spatial as sp
 import matplotlib.pyplot as plt
 
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-import torch.optim as optim
+# import torch
+# import torch.nn as nn
+# import torch.nn.functional as F
+# import torch.optim as optim
 
 def progressbar(it, prefix="", size=30, out=sys.stdout):
 
@@ -61,8 +61,9 @@ def symmetrisation( data_train, data_test, transformations, orbit_dim, model, fu
 
     new_data_test = sym_dataset( data_test, transformations )
     MSPE, risk, y_pred = model( data_train, new_data_test, func_name, orbit_dim, sym_group, 5, bandwidth = bandwidth )
+    y_pred = y_pred.reshape( (len(transformations) + 1, data_test[0].shape[0]) )
 
-    sym_y_pred = np.mean( y_pred.reshape( (len(transformations) + 1, data_test[0].shape[0]) ), axis = 0 )
+    sym_y_pred = np.mean( y_pred, axis = 0,  where = (y_pred**2 > 0) )
     sym_MSPE = np.mean( (sym_y_pred - data_test[1] )**2 )
     sym_risk = np.mean( (sym_y_pred - reg_function( data_test[0], func_name ) )**2 ) 
 
@@ -78,12 +79,8 @@ def sample_T2( n = 1, d = 2 ):
 
 def sample_T1( angle, n = 1, d = 2 ):
 
-
     tau_1 = rng.uniform( 0, 1, (n,1) )
     tau_2 = np.mod( tau_1 * np.tan(angle), 1 )
-    # leng = rng.uniform( 0, 1, (n,1) )
-    # tau_1 = np.mod( leng * np.cos(angle), 1 )
-    # tau_2 = np.mod( leng * np.sin(angle), 1 )
 
     return( np.concatenate( (tau_1, tau_2), axis = 1 ) )
 
@@ -316,7 +313,7 @@ def fit_S_G_f_n( data_train, data_test, data_validation, delta, beta, func_name,
 
 ## Main Code
 
-def run_sims(num_sims, sample_sizes, func_name):
+def run_sims(num_sims, sample_sizes, func_name, verbose = False):
 
     print( f"Numder of Simulations: {num_sims}" )
     print( f"Sample Sizes: {sample_sizes}" )
@@ -339,8 +336,9 @@ def run_sims(num_sims, sample_sizes, func_name):
     for j in range( len(sample_sizes) ):
         sample_size = sample_sizes[j]
         print( f"\nSample Size:     {sample_size}" )
-        print( f"Delta:     {find_delta( sample_size, beta, dimension, max_orbit_dim, 1 )}")
-        print( f"Angle Grid:    {T2_angle_grid(find_delta( sample_size, beta, dimension, max_orbit_dim, 1 ))}")
+        if verbose:
+            print( f"Delta:     {find_delta( sample_size, beta, dimension, max_orbit_dim, 1 )}")
+            print( f"Angle Grid:    {T2_angle_grid(find_delta( sample_size, beta, dimension, max_orbit_dim, 1 ))}")
 
         base_bandwidths[j] = fit_bandwidth_holder( sample_size, beta, dimension )
         this_best_groups =[]
@@ -353,12 +351,16 @@ def run_sims(num_sims, sample_sizes, func_name):
             data_all = ( np.concatenate( (data_train[0], data_test[0]), axis = 0 ), 
                          np.concatenate( (data_train[1], data_test[1]), axis = 0 ) )
 
+            base_start = time.time()
+
             lce_error = fit_LCE_CV( data_all, 
                                     data_validation, 
                                     func_name, 
                                     folds = 5, 
                                     bandwidth = base_bandwidths[j] ) 
             test_errors_LCE[i,j] = lce_error[1]
+
+            base_end = time.time()
 
             s_g_hat_lce_error = fit_S_G_f_n( data_train, 
                                              data_test, 
@@ -369,6 +371,12 @@ def run_sims(num_sims, sample_sizes, func_name):
                                              sym_scale_cst = sym_scale_cst,
                                              verbose = False )
             test_errors_S_G_HAT_LCE[i,j] = s_g_hat_lce_error[1]
+
+            sym_end = time.time()
+
+            if verbose:
+                print( f"Base Estimator time:\t{base_end - base_start:0.5f}" )
+                print( f"Sym Estimator time:\t{sym_end - base_end:0.5f}" )
 
             this_best_groups.append( s_g_hat_lce_error[3] )
 
@@ -386,7 +394,6 @@ def run_sims(num_sims, sample_sizes, func_name):
     sym_rate, sym_int = np.linalg.lstsq( X, np.log( test_errors_S_G_HAT_LCE.mean(axis = 0) ), rcond = None )[0]
 
     print(f"Base log/log slope:  {base_rate}, expected {- 2*beta / (2*beta + 2)}")
-    # print(f"Base log/log slope:  {nn_rate}, expected {- 2*beta / (2*beta + 3)}")
     print(f"Base log/log slope:  {sym_rate}, expected {- 2*beta / (2*beta + 0)}")
 
     with open(func_name + "_lce_results.pkl", "wb") as f:
@@ -435,13 +442,12 @@ def plot_results( num_sims, sample_sizes, func_name ):
 
 
 def main():
+    
+    num_sims = 30
+    sample_sizes = [30, 50, 75, 100, 150, 200, 300] 
+    func_name = "f3"
 
-
-    num_sims = 100
-    sample_sizes = [30, 50, 75, 100, 150, 200, 300]
-    func_name = "f4"
-
-    run_sims( num_sims, sample_sizes, func_name )
+    run_sims( num_sims, sample_sizes, func_name, verbose = False )
     plot_results( num_sims, sample_sizes, func_name )
 
     return(0)
@@ -449,32 +455,6 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 
